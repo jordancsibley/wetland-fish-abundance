@@ -1,0 +1,93 @@
+---
+title: "Wetland Fish Abundance Statistical Analysis"
+author: "Jordan Sibley"
+date: last-modified
+format: 
+  html:
+    toc: true
+---
+
+
+## Set Up 
+
+```{r}
+# Load important packages 
+library(tidyverse)
+library(here)
+library(dplyr)
+```
+
+## Data 
+
+This data comes from the SONGS Marine Mitigation database. 
+
+[Water Quality Data](https://portal.edirepository.org/nis/mapbrowse?packageid=edi.657.5)
+
+[Fish Abundance Data](https://portal.edirepository.org/nis/mapbrowse?packageid=edi.647.6)
+
+```{r}
+# Load in data
+water_quality <- read_csv(here('data', 'wetland_ts_water_quality-2024-06-12_14-49-39.csv'))
+
+fish_abund <- read_csv(here('data', 'wetland_ts_fish_seine-2024-06-12_14-50-31.csv'))
+```
+
+
+## Data Clean 
+
+For Both 
+- Subset to years 2022 and 2023 
+- Filter to Carpinteria Salt Marsh (CSM)
+
+For fish abundance 
+- remove when count is zero 
+- remove unneccessary columns 
+- create new column that gives water sampling area (seine area * depth)
+- find fish count per meter sampling area 
+
+
+```{r}
+# Filter water quality data
+water_quality_clean <- water_quality %>% 
+  filter(year %in% c(2022, 2023)) %>% 
+  filter(wetland_code == "CSM")
+
+# Filter fish abundance 
+fish_abund_clean <- fish_abund %>% 
+  filter(year %in% c(2022, 2023)) %>% 
+  filter(wetland_code == "CSM") %>% 
+  filter(count != 0) %>%  # remove when count = 0
+  select(-c(survey, module_code, seine_section_code, seine_sample_length, seine_sample_width, species_id)) %>%  # remove unnecessary columns
+  mutate(sample_area_m2 = seine_sample_area * depth) %>%  # create count per m2
+  mutate(count_per_m2 = count /sample_area_m2)
+```
+
+
+
+- Group the fish abundance data that will give the total count of fish sampled per m2 in each sample site for the day it was sampled. 
+
+This is especially helpful if sampling areas differ in size between samples. Summing raw count values without considering the area might lead to misleading results, as larger sampled areas naturally yield higher counts.
+
+This is going to group the number of hauls and group the A and B seines together. The end result will be a count of fish sampled in either a main channel or tidal creek for the sample day. This will make it easier to match up the water quality variables, merging them based on date. 
+
+```{r}
+# Group by date and site name to get total count of fish sampled
+fish_total <- fish_abund_clean %>% 
+  group_by(date, tc_mc_code) %>% 
+  summarise(total_density_per_m2 = sum(count_per_m2, na.rm = TRUE))
+
+# Create a new column for the year
+fish_total$year <- year(fish_total$date)
+```
+
+
+## Inital visulaization 
+
+Lets look at fish density over the two time periods 
+```{r}
+ggplot(fish_total, aes(x = date, y = total_density_per_m2)) +
+  geom_col() + 
+  theme_minimal()
+```
+
+
