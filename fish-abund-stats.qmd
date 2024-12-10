@@ -6,6 +6,9 @@ format:
   html:
     toc: true
 ---
+Link to article about impacts of dredging: 
+https://link.springer.com/article/10.1007/bf01866820
+
 
 
 ## Set Up 
@@ -50,18 +53,20 @@ For fish abundance
 # Filter water quality data
 water_quality_clean <- water_quality %>% 
   filter(year %in% c(2022, 2023)) %>% 
-  filter(wetland_code == "CSM")
+  filter(wetland_code == "CSM") %>% 
+  select(-c(instrument_type, wetland_code)) %>% 
+  filter(hour(sample_datetime_gmt) >= 6 & hour(sample_datetime_gmt)) %>%  # filter to sampling hours 
+  mutate(date = as.Date(sample_datetime_gmt)) # new column with just date
+  
 
 # Filter fish abundance 
 fish_abund_clean <- fish_abund %>% 
   filter(year %in% c(2022, 2023)) %>% 
   filter(wetland_code == "CSM") %>% 
-  filter(count != 0) %>%  # remove when count = 0
   select(-c(survey, module_code, seine_section_code, seine_sample_length, seine_sample_width, species_id)) %>%  # remove unnecessary columns
   mutate(sample_area_m2 = seine_sample_area * depth) %>%  # create count per m2
   mutate(count_per_m2 = count /sample_area_m2)
 ```
-
 
 
 - Group the fish abundance data that will give the total count of fish sampled per m2 in each sample site for the day it was sampled. 
@@ -73,21 +78,217 @@ This is going to group the number of hauls and group the A and B seines together
 ```{r}
 # Group by date and site name to get total count of fish sampled
 fish_total <- fish_abund_clean %>% 
-  group_by(date, tc_mc_code) %>% 
-  summarise(total_density_per_m2 = sum(count_per_m2, na.rm = TRUE))
+  group_by(date, tc_mc_code, habitat_code) %>% 
+  summarise(total_density_per_m2 = sum(count_per_m2, na.rm = TRUE)) %>%
+  mutate(habitat_code = recode(habitat_code,
+                          "TC" = "Tidal creek",
+                          "BNMC" = "Main channel")
+  )
 
 # Create a new column for the year
 fish_total$year <- year(fish_total$date)
+
+# Create binary column for pre dredging (2022) and post dredging (2023)
+fish_total$dredging <- ifelse(fish_total$year == 2023, 1, 0)
 ```
 
+
+For the water quality data, I want to find the mean values of the water quality parameters dor the time during the fish sampling. Since the fish haul data only provides a date and not a time of collection, I subseted the data to 6 AM to 4 PM as that is the time the fish abundance data was taken. 
+
+To accomplish this I use the `group_by()` function for the date and then `summarise()` and `mean()` to find the average value of the daylight hours. 
+
+```{r}
+water_quality_ave <- water_quality_clean %>% 
+  group_by(date) %>% 
+  summarise(temp_c_mean = mean(temperature_degrees_c),
+            salinity_ppt_mean = mean(salinity_ppt), 
+            salinity_practical_mean = mean(salinity_practical),
+            dissolved_oxygen_mean = mean(dissolved_oxygen_concentration_mg_l))
+```
+
+Now that I have the average water quality values, I can join it with the fish abundance data so that for each sample day, there are corresponding water quality data for the day. 
+
+```{r}
+fish_water <- merge(fish_total, water_quality_ave, by="date")
+```
+
+When I merged the data it now only has 67 rows when I was expecting it to have 72 to match the fish abundance data. Now I will determine which dates are missing. 
+```{r}
+# Perform a left join
+fish_with_water_quality <- fish_total %>%
+  left_join(water_quality_ave, by = "date")
+
+# Check which rows in fish_total do not have a match in water_quality_ave
+missing_dates <- fish_with_water_quality %>%
+  filter(is.na(temp_c_mean)) 
+
+# View the missing dates
+missing_dates
+```
+
+This test shows that there is no water quality data for the dates 2023-09-06 and 2023-09-11. This means that for 5 fish collection dates in the 2023 field season, there is no water quality data to accompany it. 
+
+After checking the original water quality data it shows that there is a gap in data from 09-10 until 09-14. 
 
 ## Inital visulaization 
 
-Lets look at fish density over the two time periods 
+Lets compare the fish density between the two years  
 ```{r}
-ggplot(fish_total, aes(x = date, y = total_density_per_m2)) +
-  geom_col() + 
+ggplot(fish_total, aes(x = year, y = total_density_per_m2, fill = as.factor(year))) +
+  geom_boxplot() +
+  scale_fill_manual(values = c("#8C510A", "#01665E")) +  
+  labs(
+    title = "Fish Total Density per m² (2022 vs 2023)",
+    x = "Year",
+    y = "Total Density per m²",
+    fill = "Year"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 14)
+  )
+```
+
+
+## Boxplot to compare fish density between years. 
+
+The log scale was applied to the y-axis because the data contains a wide range of fish density values, including many small values and a few larger ones. This disparity can make it difficult to distinguish differences in densities, as the larger values dominate the visualization. The log transformation compresses the range of values, allowing for better visualization of variations while maintaining the relative differences. 
+
+```{r}
+# Box plot of fish density (log scaled)
+ggplot(fish_total, aes(x = factor(year), y = total_density_per_m2, fill = factor(year))) +
+  geom_boxplot() +
+  scale_fill_manual(values = c("#8C510A", "#01665E")) +
+  scale_y_log10() +  # Apply log scale to y-axis
+  labs(
+    title = "Fish Total Density per m² (Log Scale)",
+    x = "Year",
+    y = "Total Density per m² (log scale)",
+    fill = "Year"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+## Seperating by habitat type: Main channel or tidal creek 
+```{r}
+ggplot(fish_total, aes(x = factor(year), y = total_density_per_m2, fill = factor(year))) +
+  geom_boxplot() +
+  scale_fill_manual(values = c("#8C510A", "#01665E")) +
+  scale_y_log10() +  # Apply log transformation to y-axis
+  labs(
+    title = "Fish Total Density per m² by Year and Habitat",
+    x = "Year",
+    y = "Log-Scaled Total Density per m²",
+    fill = "Year"
+  ) +
+  facet_wrap(~ habitat_code, labeller = label_value) +  # Panels with updated labels
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    strip.text = element_text(size = 12, face = "bold")  # Adjust facet labels
+  )
+```
+
+
+## Fish density with water qualtity parameters
+```{r}
+# ---- Fish density vs. each water quality  variable
+
+# water temp 
+ggplot(fish_water, aes(x = temp_c_mean, y = total_density_per_m2, color = factor(dredging))) + 
+  geom_point(alpha = 0.7) + 
+  geom_smooth(method = "lm", se = TRUE, lwd = 0.7) +
+  scale_color_manual(values = c("0" = "#A6611A", "1" = "#5AB4AC"),
+                     labels = c("Pre-Dredging", "Post-Dredging")) +
+  labs(color = "Dredging Status",
+       x = "Average water temperature (C)",
+       y = "Fish density per m2",
+       title = "Water Temp vs Fish Density") +
+  theme_minimal()
+  
+
+# dissolved oxygen 
+ggplot(fish_water, aes(x = dissolved_oxygen_mean, y = total_density_per_m2, color = factor(dredging))) + 
+  geom_point(alpha = 0.7) + 
+  geom_smooth(method = "lm", se = TRUE, lwd = 0.7) +
+  scale_color_manual(values = c("0" = "#A6611A", "1" = "#5AB4AC"),
+                     labels = c("Pre-Dredging", "Post-Dredging")) +
+  labs(color = "Dredging Status",
+       x = "Average dissolved oxygen concentration (mg/L)",
+       y = "Fish density per m2",
+       title = "Dissolved Oxygen vs Fish Density") +
+  theme_minimal()
+
+# salinity 
+ggplot(fish_water, aes(x = salinity_ppt_mean, y = total_density_per_m2, color = factor(dredging))) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = TRUE, lwd = 0.7) +
+  scale_color_manual(values = c("0" = "#A6611A", "1" = "#5AB4AC"),
+                     labels = c("Pre-Dredging", "Post-Dredging")) +
+  labs(color = "Dredging Status",
+       x = "Average salinity (ppt)",
+       y = "Fish density per m2",
+       title = "Salinity vs Fish Density") +
   theme_minimal()
 ```
+
+
+## Linear Regression Model
+```{r}
+# Linear regression model of water quality parameters + dredging 
+abund_model <- lm(total_density_per_m2 ~ temp_c_mean + salinity_ppt_mean + dissolved_oxygen_mean + dredging, data = fish_water)
+
+summary(abund_model)
+
+```
+
+None are significant. 
+
+Interpretation: 
+- Coefficients: Show the effect size of each variable on fish density.
+- Significance (p-values): Indicate whether the relationships are statistically significant.
+- R-squared: Explains the proportion of variance in fish density explained by your model.
+
+## Test for interactions
+To explore if the effect of water quality differs between pre- and post-dredging periods, lets include interaction terms:
+```{r}
+# Linear model with interactions between water quality & dredging
+model_interaction <- lm(total_density_per_m2 ~ temp_c_mean * dredging + salinity_ppt_mean * dredging + dissolved_oxygen_mean * dredging, data = fish_water)
+
+summary(model_interaction)
+
+```
+
+None are significant
+
+I did not find statistically significant relationships between fish density and water quality parameters (temperature, dissolved oxygen, salinity) or dredging activity. This suggests these factors may not have had a strong or measurable impact on fish density in my dataset. 
+
+Now, lets see more simply if there is a difference in fish density between the two years sperate of the water quality variables: 
+
+```{r}
+# Linear regression of fish density with only dredging as a factor
+model_dredging <- lm(total_density_per_m2 ~ dredging, data = fish_water)
+summary(model_dredging)
+```
+
+p-value is 0.40429. This is not a significant p-value which means we do not have strong evidence that there is a difference in fish abundances between 2022 and 2023. 
+
+
+## Habitat type 
+Last relationship I want to look at is if the habitat type (either main channel or tidal creek) shows a difference in fish density, as the dredging more directly impacted the main channel as opposed to the tidal creeks 
+
+```{r}
+model_habitat <- lm(total_density_per_m2 ~ dredging + habitat_code, data = fish_water)
+
+summary(model_habitat)
+
+```
+
+Dredging does not appear to significantly impact fish density, as its p-value is above 0.05.
+
+Habitat type is significant, with Tidal Creek having a higher fish density than Main channel. This indicates habitat type plays a significant role in determining fish abundance in this wetland.
 
 
